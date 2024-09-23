@@ -2,11 +2,14 @@ import math
 import uuid
 import logging
 from fastapi import APIRouter, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional, Dict
-from fast_llm_api.services.content_rank.elo_fight_generator import generate_elo_results
+from fast_llm_api.services.additional_analyis import evaluate_all_entries_story_plagiarism, cross_check_similarity
 from fast_llm_api.services.models import OneStudentEntry
 from datetime import datetime
+
+# Global Variables
+THRESHOLD_FOR_COPYING = 0.2
 
 # Set up logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -15,7 +18,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # In-memory storage for job tracking
-jobs: Dict[str, Dict] = {}
+additional_analysis_jobs: Dict[str, Dict] = {}
 
 class JobStatus(BaseModel):
     job_id: str
@@ -24,41 +27,35 @@ class JobStatus(BaseModel):
     elapsed_time: Optional[float] = None  # Add elapsed time to job status
     created_at: Optional[str] = None  # Add creation timestamp
 
-
-class SubmitJobRequest(BaseModel):
+class SubmitAdditionalAnalysisJobRequest(BaseModel):
     texts: List[OneStudentEntry]
-    num_folds: Optional[int]
+    similarity_threshold: Optional[float] = THRESHOLD_FOR_COPYING
 
 # Background task to run the ranking process
-async def process_job(job_id: str, student_entries: List[OneStudentEntry], num_folds: int):
-    logger.info(f"Starting job {job_id} with {len(student_entries)} entries and {num_folds} folds.")
-    jobs[job_id]['status'] = 'running'
-    jobs[job_id]['start_time'] = datetime.now()  # Track start time
+async def process_job(job_id: str, text_entries: List[SubmitAdditionalAnalysisJobRequest], similarity_threshold: float):
+    logger.info(f"Starting additional analysis job {job_id} with {len(text_entries)} entries.")
+    additional_analysis_jobs[job_id]['status'] = 'running'
+    additional_analysis_jobs[job_id]['start_time'] = datetime.now()  # Track start time
     try:
-        # Asynchronous AI ranking operation
-        result = await generate_elo_results(student_entries, num_folds)
-        jobs[job_id]['status'] = 'completed'
-        jobs[job_id]['result'] = result
-        jobs[job_id]['end_time'] = datetime.now()  # Track end time
-        logger.info(f"Job {job_id} completed successfully.")
-    except Exception as e:
-        jobs[job_id]['status'] = 'failed'
-        jobs[job_id]['result'] = str(e)
-        jobs[job_id]['end_time'] = datetime.now()  # Track end time
-        logger.error(f"Job {job_id} failed with error: {e}", exc_info=True)
+        # Evaluate story plagiarism and cross-check similarity
+        result_story_probs = await evaluate_all_entries_story_plagiarism(text_entries)
+        result_story_similarity_probs = await cross_check_similarity(text_entries, similarity_threshold)
 
-def recommend_num_folds(num_texts, reduction_factor=0.20):
-    """
-    Recommend the number of folds based on the number of bots and a reduction factor
-    that accounts for the initial scores already providing some guidance.
-    """
-    base_folds = math.log2(num_texts)
-    adjusted_folds = base_folds * (1 - reduction_factor)
-    return max(1, round(adjusted_folds))  # Ensure at least 1 fold
+        result = result_story_similarity_probs
+
+        additional_analysis_jobs[job_id]['status'] = 'completed'
+        additional_analysis_jobs[job_id]['result'] = result
+        additional_analysis_jobs[job_id]['end_time'] = datetime.now()  # Track end time
+        logger.info(f"Additional analysis job {job_id} completed successfully.")
+    except Exception as e:
+        additional_analysis_jobs[job_id]['status'] = 'failed'
+        additional_analysis_jobs[job_id]['result'] = str(e)
+        additional_analysis_jobs[job_id]['end_time'] = datetime.now()  # Track end time
+        logger.error(f"Additional analysis job {job_id} failed with error: {e}", exc_info=True)
 
 def calculate_elapsed_time(job):
     """
-    Calculate elapsed time for running or completed jobs.
+    Calculate elapsed time for running or completed additional_analysis_jobs.
     """
     if 'start_time' in job and job['start_time'] is not None:
         if job.get('end_time') is not None:
@@ -74,47 +71,43 @@ def format_time_korean(dt):
 
 # Endpoint to submit a large list of texts (creates a new job)
 @router.post("/submit-job")
-async def submit_job(request: SubmitJobRequest, background_tasks: BackgroundTasks):
+async def submit_job(request: SubmitAdditionalAnalysisJobRequest, background_tasks: BackgroundTasks):
     # Generate a unique job_id
     job_id = str(uuid.uuid4())
     
     # Store job in the system
-    jobs[job_id] = {
+    additional_analysis_jobs[job_id] = {
         'status': 'queued',
         'result': None,
         'start_time': None,
         'end_time': None
     }
 
-    folds = request.num_folds
-    if folds is None:
-        folds = recommend_num_folds(len(request.texts))
-
-    logger.info(f"Job {job_id} has been queued with {folds} folds.")
+    logger.info(f"Job {job_id} has been queued with similarity threshold: {request.similarity_threshold}")
     
     # Queue the task in the background
-    background_tasks.add_task(process_job, job_id, request.texts, folds)
+    background_tasks.add_task(process_job, job_id, request.texts, request.similarity_threshold)
 
     return {"job_id": job_id, "status": "Job has been queued"}
 
-# Endpoint to retrieve the status of all jobs
+# Endpoint to retrieve the status of all additional_analysis_jobs
 @router.get("/job-status")
 async def get_job_status():
     job_statuses = {}
-    for job_id, job in jobs.items():
+    for job_id, job in additional_analysis_jobs.items():
         creation_time = format_time_korean(job['start_time']) if job['start_time'] else None
         job_statuses[job_id] = {
             'status': job['status'],
             'created_at': creation_time,
             'elapsed_time': calculate_elapsed_time(job)
         }
-    logger.info("Returning status for all jobs.")
+    logger.info("Returning status for all additional analysis jobs.")
     return job_statuses
 
 # Endpoint to retrieve the status of a specific job
 @router.get("/job-status/{job_id}")
 async def get_job_status_by_id(job_id: str):
-    job = jobs.get(job_id)
+    job = additional_analysis_jobs.get(job_id)
     if job:
         creation_time = format_time_korean(job['start_time']) if job['start_time'] else None
         return {
@@ -130,10 +123,11 @@ async def get_job_status_by_id(job_id: str):
 # Endpoint to retrieve the result of a specific job by job_id
 @router.get("/job-result/{job_id}")
 async def get_job_result(job_id: str):
-    job = jobs.get(job_id)
+    job = additional_analysis_jobs.get(job_id)
     if job:
         creation_time = format_time_korean(job['start_time']) if job['start_time'] else None
         if job['status'] == 'completed':
+            logger.info(f"Returning result for job {job_id}.")
             return {
                 "job_id": job_id,
                 "result": job['result'],

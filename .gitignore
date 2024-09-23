@@ -1,1 +1,4 @@
 .env
+.DS_Store
+demo_utilities/private_datasets/*
+__pycache__

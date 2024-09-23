@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from fast_llm_api.services.llm_helper import call_openai, call_anthropic
+from fast_llm_api.helpers.basic_llm_callers import call_openai, call_anthropic
 
 router = APIRouter()
 

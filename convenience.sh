@@ -1,0 +1,1 @@
+sudo docker build --platform linux/amd64 -t fast_llm_api . ; docker tag fast_llm_api:latest 696651694142.dkr.ecr.ap-northeast-2.amazonaws.com/theta-one/fast-llm:latest ; docker push 696651694142.dkr.ecr.ap-northeast-2.amazonaws.com/theta-one/fast-llm
